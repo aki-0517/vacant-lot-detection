@@ -65,8 +65,8 @@ def setup_data_loaders(config: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
         train_dataset,
         batch_size=config['training']['batch_size'],
         shuffle=True,
-        num_workers=0,
-        pin_memory=False,
+        num_workers=4,
+        pin_memory=True,
         collate_fn=collate_fn
     )
     
@@ -74,8 +74,8 @@ def setup_data_loaders(config: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
         val_dataset,
         batch_size=config['training']['batch_size'],
         shuffle=False,
-        num_workers=0,
-        pin_memory=False,
+        num_workers=4,
+        pin_memory=True,
         collate_fn=collate_fn
     )
     

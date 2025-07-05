@@ -11,7 +11,6 @@ import logging
 from pathlib import Path
 from tqdm import tqdm
 import cv2
-from PIL import Image
 
 from data_pipeline.dataset import (
     EvaluationDataset,
@@ -19,7 +18,7 @@ from data_pipeline.dataset import (
     collate_fn
 )
 from models.build_model import build_model, load_checkpoint
-from utils import setup_logging, apply_nms, mask_to_polygons
+from utils import setup_logging, mask_to_polygons
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -65,73 +64,10 @@ def setup_data_loaders(config: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
     return bbox_loader, seg_loader
 
 
-def predict_bboxes(model: nn.Module,
-                   data_loader: DataLoader,
-                   device: torch.device,
-                   config: Dict[str, Any]) -> List[Dict]:
-    model.eval()
-    predictions = []
-    
-    with torch.no_grad():
-        pbar = tqdm(data_loader, desc='Predicting bboxes')
-        
-        for batch in pbar:
-            images = batch['images'].to(device)
-            image_paths = batch['image_paths']
-            image_names = batch['image_names']
-            
-            # Forward pass
-            outputs = model(images)
-            
-            # Process each image in batch
-            for i in range(images.size(0)):
-                image_name = image_names[i]
-                
-                # If model returns dict (combined model)
-                if isinstance(outputs, dict):
-                    if 'bbox' in outputs:
-                        bbox_output = outputs['bbox']
-                        cls_scores = torch.sigmoid(bbox_output['classification'][i])
-                        bbox_coords = bbox_output['regression'][i]
-                    else:
-                        # Use segmentation output to generate bboxes
-                        seg_output = outputs['segmentation'][i]
-                        cls_scores, bbox_coords = segmentation_to_bbox(seg_output, config)
-                else:
-                    # Single segmentation model - convert to bboxes
-                    seg_output = outputs[i]
-                    cls_scores, bbox_coords = segmentation_to_bbox(seg_output, config)
-                
-                # Filter by score threshold
-                valid_indices = cls_scores > config['inference']['score_threshold']
-                
-                if valid_indices.any():
-                    valid_scores = cls_scores[valid_indices]
-                    valid_boxes = bbox_coords[valid_indices]
-                    
-                    # Apply NMS
-                    keep_indices = apply_nms(valid_boxes, valid_scores, config['inference']['nms_iou_threshold'])
-                    
-                    final_boxes = valid_boxes[keep_indices]
-                    final_scores = valid_scores[keep_indices]
-                    
-                    # Convert to submission format
-                    for box, score in zip(final_boxes, final_scores):
-                        x1, y1, x2, y2 = box.cpu().numpy()
-                        predictions.append({
-                            'image_name': image_name,
-                            'bbox': [float(x1), float(y1), float(x2 - x1), float(y2 - y1)],  # [x, y, w, h]
-                            'score': float(score),
-                            'category_id': 1
-                        })
-    
-    return predictions
-
-
-def predict_segmentations(model: nn.Module,
-                         data_loader: DataLoader,
-                         device: torch.device,
-                         config: Dict[str, Any]) -> List[Dict]:
+def predict_segmentations_fast(model: nn.Module,
+                               data_loader: DataLoader,
+                               device: torch.device,
+                               config: Dict[str, Any]) -> List[Dict]:
     model.eval()
     predictions = []
     
@@ -140,7 +76,6 @@ def predict_segmentations(model: nn.Module,
         
         for batch in pbar:
             images = batch['images'].to(device)
-            image_paths = batch['image_paths']
             image_names = batch['image_names']
             
             # Forward pass
@@ -177,36 +112,62 @@ def predict_segmentations(model: nn.Module,
     return predictions
 
 
-def segmentation_to_bbox(seg_output: torch.Tensor, config: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor]:
-    prob_mask = torch.sigmoid(seg_output)
-    binary_mask = (prob_mask > config['inference']['mask_threshold']).cpu().numpy()
+def predict_bboxes_fast(model: nn.Module,
+                        data_loader: DataLoader,
+                        device: torch.device,
+                        config: Dict[str, Any]) -> List[Dict]:
+    model.eval()
+    predictions = []
     
-    # Find connected components
-    num_labels, labels = cv2.connectedComponents(binary_mask[0].astype(np.uint8))
-    
-    scores = []
-    boxes = []
-    
-    for label in range(1, num_labels):  # Skip background (label 0)
-        component_mask = (labels == label)
+    with torch.no_grad():
+        pbar = tqdm(data_loader, desc='Predicting bboxes')
         
-        # Calculate score as mean probability in the component
-        component_prob = prob_mask[0].cpu().numpy() * component_mask
-        score = np.mean(component_prob[component_mask])
-        
-        # Find bounding box
-        y_indices, x_indices = np.where(component_mask)
-        if len(y_indices) > 0 and len(x_indices) > 0:
-            x1, y1 = np.min(x_indices), np.min(y_indices)
-            x2, y2 = np.max(x_indices), np.max(y_indices)
+        for batch in pbar:
+            images = batch['images'].to(device)
+            image_names = batch['image_names']
             
-            scores.append(score)
-            boxes.append([x1, y1, x2, y2])
+            # Forward pass
+            outputs = model(images)
+            
+            # Process each image in batch
+            for i in range(images.size(0)):
+                image_name = image_names[i]
+                
+                # Get segmentation output and convert to bbox
+                if isinstance(outputs, dict):
+                    seg_output = outputs['segmentation'][i]
+                else:
+                    seg_output = outputs[i]
+                
+                # Convert to probability mask
+                prob_mask = torch.sigmoid(seg_output).cpu().numpy()
+                binary_mask = (prob_mask > config['inference']['mask_threshold']).astype(np.uint8)
+                
+                # Find connected components
+                num_labels, labels = cv2.connectedComponents(binary_mask[0])
+                
+                for label in range(1, num_labels):  # Skip background
+                    component_mask = (labels == label)
+                    
+                    # Calculate score as mean probability
+                    score = np.mean(prob_mask[0][component_mask])
+                    
+                    if score > config['inference']['score_threshold']:
+                        # Find bounding box
+                        y_indices, x_indices = np.where(component_mask)
+                        if len(y_indices) > 0 and len(x_indices) > 0:
+                            x1, y1 = np.min(x_indices), np.min(y_indices)
+                            x2, y2 = np.max(x_indices), np.max(y_indices)
+                            w, h = x2 - x1, y2 - y1
+                            
+                            predictions.append({
+                                'image_name': image_name,
+                                'bbox': [float(x1), float(y1), float(w), float(h)],
+                                'score': float(score),
+                                'category_id': 1
+                            })
     
-    if len(scores) == 0:
-        return torch.tensor([]), torch.tensor([]).reshape(0, 4)
-    
-    return torch.tensor(scores), torch.tensor(boxes, dtype=torch.float32)
+    return predictions
 
 
 def create_submission_files(bbox_predictions: List[Dict],
@@ -247,27 +208,14 @@ def create_submission_files(bbox_predictions: List[Dict],
     logging.info(f'Saved segmentation predictions: {seg_path}')
 
 
-def visualize_predictions(model: nn.Module,
-                         data_loader: DataLoader,
-                         device: torch.device,
-                         config: Dict[str, Any],
-                         output_dir: Path,
-                         num_samples: int = 10) -> None:
-    logging.info("Visualization skipped to speed up inference")
-
-
 def main():
-    parser = argparse.ArgumentParser(description='Inference for land vacancy detection')
+    parser = argparse.ArgumentParser(description='Fast inference for land vacancy detection')
     parser.add_argument('--config', type=str, default='configs/config.yaml',
                        help='Path to config file')
     parser.add_argument('--checkpoint', type=str, required=True,
                        help='Path to model checkpoint')
     parser.add_argument('--output_dir', type=str, default='data/submissions',
                        help='Output directory for submission files')
-    parser.add_argument('--visualize', action='store_true',
-                       help='Generate visualization of predictions')
-    parser.add_argument('--num_vis', type=int, default=10,
-                       help='Number of samples to visualize')
     
     args = parser.parse_args()
     
@@ -276,7 +224,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Setup logging
-    setup_logging(output_dir / 'inference.log')
+    setup_logging(output_dir / 'fast_inference.log')
     
     # Load config
     config = load_config(args.config)
@@ -300,23 +248,18 @@ def main():
     
     # Predict bboxes
     logging.info('Predicting bounding boxes...')
-    bbox_predictions = predict_bboxes(model, bbox_loader, device, config)
+    bbox_predictions = predict_bboxes_fast(model, bbox_loader, device, config)
     logging.info(f'Generated {len(bbox_predictions)} bbox predictions')
     
     # Predict segmentations
     logging.info('Predicting segmentations...')
-    seg_predictions = predict_segmentations(model, seg_loader, device, config)
+    seg_predictions = predict_segmentations_fast(model, seg_loader, device, config)
     logging.info(f'Generated {len(seg_predictions)} segmentation predictions')
     
     # Create submission files
     create_submission_files(bbox_predictions, seg_predictions, output_dir)
     
-    # Visualize predictions
-    if args.visualize:
-        logging.info('Generating visualizations...')
-        visualize_predictions(model, seg_loader, device, config, output_dir, args.num_vis)
-    
-    logging.info('Inference completed!')
+    logging.info('Fast inference completed!')
 
 
 if __name__ == '__main__':
