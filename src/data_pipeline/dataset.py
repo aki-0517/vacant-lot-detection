@@ -22,8 +22,14 @@ class BBoxDataset(Dataset):
         with open(annotations_path, 'r') as f:
             self.annotations = json.load(f)
         
-        self.images = {img['id']: img for img in self.annotations['images']}
-        self.image_ids = list(self.images.keys())
+        # Handle different annotation formats
+        if self.annotations['images'] and 'id' in self.annotations['images'][0]:
+            self.images = {img['id']: img for img in self.annotations['images']}
+            self.image_ids = list(self.images.keys())
+        else:
+            # Use index as id for images without id field
+            self.images = {i: img for i, img in enumerate(self.annotations['images'])}
+            self.image_ids = list(self.images.keys())
         
         # Group annotations by image_id
         self.annotations_by_image = {}
@@ -95,8 +101,14 @@ class SegmentationDataset(Dataset):
         with open(annotations_path, 'r') as f:
             self.annotations = json.load(f)
         
-        self.images = {img['id']: img for img in self.annotations['images']}
-        self.image_ids = list(self.images.keys())
+        # Handle different annotation formats
+        if self.annotations['images'] and 'id' in self.annotations['images'][0]:
+            self.images = {img['id']: img for img in self.annotations['images']}
+            self.image_ids = list(self.images.keys())
+        else:
+            # Use index as id for images without id field
+            self.images = {i: img for i, img in enumerate(self.annotations['images'])}
+            self.image_ids = list(self.images.keys())
     
     def __len__(self) -> int:
         return len(self.image_ids)
@@ -172,6 +184,7 @@ class EvaluationDataset(Dataset):
 
 def get_train_transforms(config: Dict) -> A.Compose:
     transforms = [
+        A.Resize(256, 256),
         A.HorizontalFlip(p=config['augmentation']['horizontal_flip']),
         A.VerticalFlip(p=config['augmentation']['vertical_flip']),
         A.Rotate(limit=config['augmentation']['rotation_limit'], p=0.5),
@@ -189,6 +202,7 @@ def get_train_transforms(config: Dict) -> A.Compose:
 
 def get_val_transforms() -> A.Compose:
     transforms = [
+        A.Resize(256, 256),
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2()
     ]
