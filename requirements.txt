@@ -1,0 +1,13 @@
+torch>=2.0
+torchvision
+opencv-python
+pyyaml
+numpy
+Pillow
+tqdm
+scikit-learn
+tensorboard
+matplotlib
+seaborn
+albumentations
+segmentation-models-pytorch

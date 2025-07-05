@@ -1,0 +1,55 @@
+data:
+  raw_dir: data/raw/
+  processed_dir: data/processed/
+  bbox_dir: data/processed/bbox/
+  segmentation_dir: data/processed/segmentation/
+  submission_dir: data/submissions/
+
+model:
+  type: unet
+  backbone: resnet34
+  num_classes: 1
+  pretrained: true
+
+training:
+  epochs: 50
+  batch_size: 8
+  lr: 1e-4
+  weight_decay: 1e-5
+  scheduler: cosine
+  warmup_epochs: 5
+  early_stopping_patience: 10
+
+augmentation:
+  horizontal_flip: 0.5
+  vertical_flip: 0.5
+  rotation_limit: 45
+  brightness_limit: 0.2
+  contrast_limit: 0.2
+
+logging:
+  tensorboard_logdir: outputs/logs/
+  log_interval: 10
+  save_images: true
+
+checkpoint:
+  dir: outputs/checkpoints/
+  save_best: true
+  save_last: true
+  monitor: val_loss
+  mode: min
+
+inference:
+  score_threshold: 0.5
+  nms_iou_threshold: 0.3
+  mask_threshold: 0.5
+  batch_size: 4
+
+paths:
+  train_bbox_images: train_bbox_images.zip
+  train_bbox_annotations: train_bbox_annotations.json
+  train_segmentation_images: train_segmentation_images.zip
+  train_segmentation_annotations: train_segmentation_annotations.json
+  evaluation_bbox_images: evaluation_bbox_images.zip
+  evaluation_segmentation_images: evaluation_segmentation_images.zip
+  sample_submission: sample_submission.zip
